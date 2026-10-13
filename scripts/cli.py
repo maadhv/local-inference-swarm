@@ -13,10 +13,10 @@ def build_parser():
     p = argparse.ArgumentParser(prog="localswarm", description="LocalSwarm MVP: llama.cpp RPC orchestration")
     sub = p.add_subparsers(dest="mode")
 
-    w = sub.add_parser("worker", help="Inference host: run ggml-rpc-server on the NVIDIA GPU")
+    w = sub.add_parser("worker", help="Inference host: expose NVIDIA GPU, or CPU/RAM if no NVIDIA GPU is found")
     w.add_argument("--port", type=int, default=config.DEFAULT_RPC_PORT)
     w.add_argument("--bind", default=config.DEFAULT_BIND, help="bind address (default 0.0.0.0, LAN test only)")
-    w.add_argument("--device", help="force a llama.cpp device id (e.g. Vulkan1); default: auto-detect NVIDIA")
+    w.add_argument("--device", help="force a llama.cpp device id (e.g. Vulkan1 or CPU); default: NVIDIA or CPU")
     w.add_argument("--rpc-server", help="path to ggml-rpc-server.exe")
     w.add_argument("--llama-cli", help="path to llama-cli.exe (used only for device detection)")
 
@@ -27,9 +27,10 @@ def build_parser():
     c.add_argument("--port", type=int, default=config.DEFAULT_RPC_PORT)
     c.add_argument("--llama-cli", help="path to llama-cli.exe")
     c.add_argument("-n", "--n-predict", type=int, default=config.DEFAULT_N_PREDICT)
-    c.add_argument("--local-device", default=config.LOCAL_DEVICE_DEFAULT,
-                   help="value for llama-cli --device (default 'none': no local GPU)")
-    c.add_argument("--gpu-layers", type=int, default=None, help="optional -ngl value")
+    c.add_argument("--split-percent", type=int, default=config.DEFAULT_REMOTE_PERCENT,
+                   help="approximate model-layer percentage assigned to the worker (default: 50)")
+    c.add_argument("--gpu-layers", type=int, default=None,
+                   help="override the number of layers assigned to the worker")
     c.add_argument("--verbose", action="store_true", help="stream llama-cli's stderr log live")
     c.add_argument("--list-devices", action="store_true", help="show devices llama-cli sees with --rpc, then exit")
     return p

@@ -106,10 +106,12 @@ class Device:
 
     @property
     def backend(self) -> str:
+        if self.id.upper().startswith("RPC"):
+            return "RPC"
         return re.sub(r"\d+$", "", self.id)
 
 
-_DEV_RE = re.compile(r"^\s+([A-Za-z]+\d+):\s+(.+?)(?:\s+\((\d+)\s*MiB.*\))?\s*$")
+_DEV_RE = re.compile(r"^\s+([A-Za-z][A-Za-z0-9_]*(?:\[[^\]]+\])?):\s+(.+?)(?:\s+\((\d+)\s*MiB.*\))?\s*$")
 
 
 def parse_devices(text: str) -> List[Device]:

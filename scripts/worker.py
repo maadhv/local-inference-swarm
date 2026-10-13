@@ -1,4 +1,4 @@
-"""Worker / Inference Host: starts ggml-rpc-server pinned to the NVIDIA GPU."""
+"""Worker / Inference Host: exposes NVIDIA GPU when present, otherwise CPU/RAM."""
 import subprocess
 import sys
 import threading
@@ -22,10 +22,10 @@ def run_worker(args) -> int:
     print(f"[✓] rpc-server: {rpc_exe}  (via {how})")
     print(f"    {llama.get_version(rpc_exe)}")
 
-    # -d / --device must exist in this build, otherwise we cannot pin the GPU.
+    # -d / --device must exist so integrated GPUs can be excluded on CPU fallback.
     if not (llama.supports_flag(rpc_exe, "--device") or llama.supports_flag(rpc_exe, "-d")):
-        print("[!] This rpc-server build does not advertise -d/--device, so the GPU cannot be selected.")
-        print("    Refusing to start: it could silently pick the AMD iGPU. Update llama.cpp.")
+        print("[!] This rpc-server build does not advertise -d/--device, so compute cannot be pinned safely.")
+        print("    Refusing to start because it could silently select an integrated GPU. Update llama.cpp.")
         return 1
 
     print("Detecting GPU...")
@@ -39,6 +39,9 @@ def run_worker(args) -> int:
             print("[!] Could not parse `llama-cli --list-devices` output:\n" + raw.strip())
     else:
         print(f"[!] llama-cli not found ({cli_how}); cannot auto-detect devices.")
+        if not args.device:
+            print("    Install an RPC-enabled llama.cpp CLI, or pass --device <ID> to select the worker device explicitly.")
+            return 1
 
     if devices:
         print("    Devices reported by llama.cpp:")
@@ -54,11 +57,11 @@ def run_worker(args) -> int:
     else:
         device = gpu.find_nvidia(devices)
         if not device:
-            print("[!] No NVIDIA device found in the llama.cpp device list. NOT falling back to another GPU.")
-            print("    Check NVIDIA drivers / Vulkan support, or pass --device <ID> to choose explicitly.")
-            return 1
+            # Pin CPU explicitly so a weak integrated GPU is not chosen as an accelerator.
+            device = llama.Device("CPU", "CPU (system RAM)")
+            print("[!] No NVIDIA device found. Exposing the CPU/RAM backend; integrated GPUs are not selected.")
 
-    print(f"\n[WORKER]\nGPU: {device.name}\nBackend: {device.backend}\nDevice: {device.id}")
+    print(f"\n[WORKER]\nCompute device: {device.name}\nBackend: {device.backend}\nDevice: {device.id}")
     print(f"RPC: {args.bind}:{args.port}\nStatus: STARTING\n")
     if args.bind == "0.0.0.0":
         print("[!] Bound to 0.0.0.0 for the LAN test. Do not expose this port to the internet; "
@@ -83,8 +86,8 @@ def run_worker(args) -> int:
             print(f"[RPC] {line}", flush=True)
             low = line.lower()
             if "accepted client connection" in low:
-                print("[WORKER] Status: CONNECTED -- RPC connection only; this is NOT proof of GPU "
-                      "compute. Watch `nvidia-smi -l 1` while the controller generates.", flush=True)
+                print("[WORKER] Status: CONNECTED -- RPC connection only; this is NOT proof of compute. "
+                      "Watch GPU activity (for NVIDIA, `nvidia-smi -l 1`) during generation.", flush=True)
             elif "client connection closed" in low or "client disconnected" in low:
                 print("[WORKER] Status: WAITING (controller disconnected)", flush=True)
         stop.set()
@@ -98,7 +101,7 @@ def run_worker(args) -> int:
         _explain_worker_failure("\n".join(tail), args.port)
         return 1
 
-    print(f"\n[WORKER]\nGPU: {device.name}\nBackend: {device.backend}\nRPC: {args.bind}:{args.port}\nStatus: WAITING")
+    print(f"\n[WORKER]\nCompute device: {device.name}\nBackend: {device.backend}\nRPC: {args.bind}:{args.port}\nStatus: WAITING")
     print("\nWaiting for controller... (Ctrl+C to stop)")
     print("Verify GPU use from another PowerShell window:  nvidia-smi -l 1\n")
 

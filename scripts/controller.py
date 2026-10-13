@@ -8,7 +8,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from . import config, llama, network
+from . import config, gguf, llama, network
 
 BAR = "=" * 60
 
@@ -167,6 +167,9 @@ def run_controller(args) -> int:
         if not prompt:
             print("[!] Empty prompt.")
             return 1
+        if not 1 <= args.split_percent <= 99:
+            print("[!] --split-percent must be between 1 and 99.")
+            return 1
     except EOFError:
         print("\n[!] Input closed.")
         return 1
@@ -190,6 +193,10 @@ def run_controller(args) -> int:
               "    'RPC not supported in this build'). Remove it from PATH/cwd, or pass --llama-cli <path> "
               "to the WinGet install.")
         return 1
+    if not llama.supports_flag(cli, "--device"):
+        print("[!] This llama-cli build does not support --device, so the local integrated GPU cannot be excluded safely.")
+        print("    Install a newer RPC-enabled llama.cpp build and try again.")
+        return 1
     print("[✓] RPC support detected")
     print(f"[✓] GGUF validated: {model}")
 
@@ -203,20 +210,38 @@ def run_controller(args) -> int:
     print("[✓] Worker reachable (TCP only -- not proof the RPC protocol/GPU works)")
     print(f"[✓] RPC endpoint: {ip}:{port}")
 
-    cmd = [str(cli), "-m", str(model), "--device", args.local_device, "--rpc", f"{ip}:{port}",
-           "-n", str(args.n_predict)]
-    if args.gpu_layers is not None:
-        cmd += ["-ngl", str(args.gpu_layers)]
+    devices, raw_devices = llama.list_devices(cli, ["--rpc", f"{ip}:{port}"])
+    rpc_device = next((d for d in devices if d.backend.lower() == "rpc"), None)
+    if not rpc_device:
+        print("[!] llama.cpp did not report a remote RPC device. Cannot safely choose the worker for the split.")
+        if raw_devices.strip():
+            print("    Devices reported:\n" + raw_devices.strip())
+        print("    Confirm that the worker is running an RPC-enabled llama.cpp build and that both builds are compatible.")
+        return 1
+    try:
+        total_layers = gguf.get_layer_count(model)
+    except (OSError, ValueError) as e:
+        print(f"[!] Could not read the model's layer count from its GGUF metadata: {e}")
+        print("    Use a valid GGUF file. The 50/50 layer split needs the model's block_count metadata.")
+        return 1
+    remote_layers = args.gpu_layers if args.gpu_layers is not None else max(
+        1, min(total_layers - 1, round(total_layers * args.split_percent / 100)))
+    if not 1 <= remote_layers < total_layers:
+        print(f"[!] Worker layer count must be from 1 to {total_layers - 1} for a two-sided split.")
+        return 1
+    local_layers = total_layers - remote_layers
+    print(f"[✓] Worker device: {rpc_device.id} ({rpc_device.name})")
+    print(f"[✓] Layer split: {remote_layers}/{total_layers} on worker; {local_layers}/{total_layers} on controller CPU/RAM")
+
+    cmd = [str(cli), "-m", str(model), "--rpc", f"{ip}:{port}", "--device", rpc_device.id,
+       "-ngl", str(remote_layers), "-n", str(args.n_predict)]
     if llama.supports_flag(cli, "--single-turn"):
         cmd += ["-st"]
     elif llama.supports_flag(cli, "-no-cnv"):
         cmd += ["-no-cnv"]
     cmd += ["-p", prompt]
 
-    if args.local_device == "none":
-        print("[✓] Local GPU disabled: --device none")
-    else:
-        print(f"[!] Local device override: --device {args.local_device}")
+    print("[✓] Controller local GPU excluded; remaining layers stay on controller CPU/RAM")
     print("\nCommand:\n  " + " ".join(f'"{c}"' if (" " in c or not c) else c for c in cmd))
     print("\n[+] Starting inference...  (Ctrl+C to interrupt)\n")
 
@@ -253,10 +278,9 @@ def _report(r: Result, args) -> int:
     if r.rpc_buffer_seen:
         print("    Log evidence: llama.cpp placed buffers on an RPC device (see --verbose log).")
     else:
-        print("[!] No RPC buffer allocation seen in llama.cpp's log. The model may have run entirely on this "
-              "PC's CPU, in which case the worker GPU did NOT do the compute -- and `--device none` may be "
-              "excluding the RPC device too. See README 'Verifying remote compute'.")
-    print("    Remote GPU compute is only confirmed by nvidia-smi on the worker showing load during generation.")
+        print("[!] No RPC buffer allocation seen in llama.cpp's log. The model may have run entirely on the "
+              "controller CPU; check the --verbose logs and worker activity.")
+    print("    Confirm worker compute from its GPU monitor (NVIDIA: `nvidia-smi -l 1`) or CPU activity.")
     return 0
 
 
