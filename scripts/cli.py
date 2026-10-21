@@ -21,16 +21,20 @@ def build_parser():
     w.add_argument("--llama-cli", help="path to llama-cli.exe (used only for device detection)")
 
     c = sub.add_parser("controller", help="Prompting host: send a prompt through llama.cpp RPC")
-    c.add_argument("--ip", help="worker IP")
+    c.add_argument("--ip", help="single worker IP (legacy; use --workers for several)")
+    c.add_argument("--workers", help="comma-separated worker IPs; each uses --port")
     c.add_argument("--model", help="path to local .gguf file")
     c.add_argument("--prompt")
     c.add_argument("--port", type=int, default=config.DEFAULT_RPC_PORT)
     c.add_argument("--llama-cli", help="path to llama-cli.exe")
     c.add_argument("-n", "--n-predict", type=int, default=config.DEFAULT_N_PREDICT)
-    c.add_argument("--split-percent", type=int, default=config.DEFAULT_REMOTE_PERCENT,
-                   help="approximate model-layer percentage assigned to the worker (default: 50)")
+    split_group = c.add_mutually_exclusive_group()
+    split_group.add_argument("--split-percent", type=int, default=config.DEFAULT_REMOTE_PERCENT,
+                             help="approximate total model-layer percentage assigned to all workers (default: 50)")
+    split_group.add_argument("--split",
+                             help="percentages ordered as controller, worker1, worker2, ...; must sum to 100 (e.g. 40,60)")
     c.add_argument("--gpu-layers", type=int, default=None,
-                   help="override the number of layers assigned to the worker")
+                   help="override the total number of layers assigned across all workers")
     c.add_argument("--verbose", action="store_true", help="stream llama-cli's stderr log live")
     c.add_argument("--list-devices", action="store_true", help="show devices llama-cli sees with --rpc, then exit")
     return p

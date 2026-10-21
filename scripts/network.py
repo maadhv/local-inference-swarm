@@ -18,6 +18,12 @@ def validate_ip(text: str):
     return str(ip), None
 
 
+def rpc_endpoint(host: str, port: int) -> str:
+    """Format an RPC endpoint, adding brackets around IPv6 literals."""
+    ip = ipaddress.ip_address(host)
+    return f"[{host}]:{port}" if ip.version == 6 else f"{host}:{port}"
+
+
 def tcp_check(host: str, port: int, timeout: float = TCP_TIMEOUT_S):
     """Return (ok, explanation). Only proves the port accepts TCP connections."""
     try:

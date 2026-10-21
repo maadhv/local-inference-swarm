@@ -14,13 +14,20 @@ BAR = "=" * 60
 
 
 # ---------- input helpers ----------
-def ask_ip(preset=None):
+def ask_workers(preset=None):
     while True:
-        raw = preset or input("Worker IP: ")
-        ip, err = network.validate_ip(raw)
-        if ip:
-            return ip
-        print(f"[!] {err}")
+        raw = preset or input("Worker IPs (comma-separated): ")
+        workers = []
+        error = None
+        for item in raw.split(","):
+            ip, error = network.validate_ip(item)
+            if not ip:
+                break
+            if ip not in workers:
+                workers.append(ip)
+        if not error and workers:
+            return workers
+        print(f"[!] {error or 'Enter at least one worker IP.'}")
         preset = None
 
 
@@ -159,15 +166,19 @@ def run_inference(cmd, verbose=False) -> Result:
 def run_controller(args) -> int:
     print(f"{BAR}\n{'PROMPTING HOST':^60}\n{BAR}\n")
     try:
-        ip = ask_ip(args.ip)
+        if args.ip and args.workers:
+            print("[!] Use either --ip or --workers, not both.")
+            return 1
+        worker_input = args.workers or args.ip
+        workers = ask_workers(worker_input)
         if args.list_devices:
-            return _list_devices(args, ip)
+            return _list_devices(args, workers)
         model = ask_model(args.model)
         prompt = args.prompt or input("Prompt: ").strip()
         if not prompt:
             print("[!] Empty prompt.")
             return 1
-        if not 1 <= args.split_percent <= 99:
+        if args.split is None and not 1 <= args.split_percent <= 99:
             print("[!] --split-percent must be between 1 and 99.")
             return 1
     except EOFError:
@@ -201,19 +212,21 @@ def run_controller(args) -> int:
     print(f"[✓] GGUF validated: {model}")
 
     port = args.port
-    ok, msg = network.tcp_check(ip, port)
-    if not ok:
-        print(f"\n[!] Worker not reachable at {ip}:{port}\n    {msg}")
-        print("    Check: worker started first? same network? Windows Firewall on the worker allows "
-              f"inbound TCP {port}? (This tool does not open firewall rules.)")
-        return 1
-    print("[✓] Worker reachable (TCP only -- not proof the RPC protocol/GPU works)")
-    print(f"[✓] RPC endpoint: {ip}:{port}")
+    endpoints = [network.rpc_endpoint(ip, port) for ip in workers]
+    for ip, endpoint in zip(workers, endpoints):
+        ok, msg = network.tcp_check(ip, port)
+        if not ok:
+            print(f"\n[!] Worker not reachable at {endpoint}\n    {msg}")
+            print("    Start each worker first and check same-network access and its inbound firewall rule.")
+            return 1
+        print(f"[✓] Worker reachable: {endpoint} (TCP only -- not proof of RPC compute)")
+    rpc_arg = ",".join(endpoints)
+    print(f"[✓] RPC workers: {rpc_arg}")
 
-    devices, raw_devices = llama.list_devices(cli, ["--rpc", f"{ip}:{port}"])
-    rpc_device = next((d for d in devices if d.backend.lower() == "rpc"), None)
-    if not rpc_device:
-        print("[!] llama.cpp did not report a remote RPC device. Cannot safely choose the worker for the split.")
+    devices, raw_devices = llama.list_devices(cli, ["--rpc", rpc_arg])
+    rpc_devices = [d for d in devices if d.backend.lower() == "rpc"]
+    if not rpc_devices:
+        print("[!] llama.cpp did not report remote RPC devices. Cannot safely choose the workers for the split.")
         if raw_devices.strip():
             print("    Devices reported:\n" + raw_devices.strip())
         print("    Confirm that the worker is running an RPC-enabled llama.cpp build and that both builds are compatible.")
@@ -224,17 +237,61 @@ def run_controller(args) -> int:
         print(f"[!] Could not read the model's layer count from its GGUF metadata: {e}")
         print("    Use a valid GGUF file. The 50/50 layer split needs the model's block_count metadata.")
         return 1
-    remote_layers = args.gpu_layers if args.gpu_layers is not None else max(
-        1, min(total_layers - 1, round(total_layers * args.split_percent / 100)))
-    if not 1 <= remote_layers < total_layers:
-        print(f"[!] Worker layer count must be from 1 to {total_layers - 1} for a two-sided split.")
+    split_weights = None
+    if args.split is not None:
+        try:
+            percentages = [int(value.strip()) for value in args.split.split(",")]
+        except ValueError:
+            print("[!] --split must contain comma-separated whole-number percentages, e.g. 10,60,30.")
+            return 1
+        if len(percentages) != len(workers) + 1:
+            print(f"[!] --split needs {len(workers) + 1} percentages: controller, then one per worker in --workers order.")
+            return 1
+        if any(value < 0 or value > 100 for value in percentages) or sum(percentages) != 100:
+            print("[!] --split percentages must be from 0 to 100 and add up to 100.")
+            return 1
+        if any(value == 0 for value in percentages[1:]):
+            print("[!] Each worker needs a positive split percentage.")
+            return 1
+        if args.gpu_layers is not None:
+            print("[!] --gpu-layers cannot be combined with --split; --split determines the worker layer count.")
+            return 1
+        if len(rpc_devices) != len(workers):
+            print(f"[!] Per-worker splits need exactly one exposed RPC device per worker; found {len(rpc_devices)} devices for {len(workers)} workers.")
+            print("    Start each worker with one selected device, or use --split-percent for llama.cpp's automatic device allocation.")
+            return 1
+        split_weights = percentages[1:]
+        remote_percent = sum(split_weights)
+    else:
+        remote_percent = args.split_percent
+    if args.gpu_layers is not None:
+        remote_layers = args.gpu_layers
+    elif split_weights is not None and percentages[0] == 0:
+        remote_layers = total_layers
+    else:
+        remote_layers = max(1, min(total_layers - 1, round(total_layers * remote_percent / 100)))
+    max_remote_layers = total_layers if split_weights is not None and percentages[0] == 0 else total_layers - 1
+    if not 1 <= remote_layers <= max_remote_layers:
+        print(f"[!] Worker layer count must be from 1 to {max_remote_layers} for this split.")
         return 1
     local_layers = total_layers - remote_layers
-    print(f"[✓] Worker device: {rpc_device.id} ({rpc_device.name})")
-    print(f"[✓] Layer split: {remote_layers}/{total_layers} on worker; {local_layers}/{total_layers} on controller CPU/RAM")
+    for d in rpc_devices:
+        print(f"[✓] Worker device: {d.id} ({d.name})")
+    if split_weights is not None:
+        for worker, d, percent in zip(workers, rpc_devices, split_weights):
+            print(f"[✓] Planned split: controller {percentages[0]}%; {worker} {percent}% ({d.id})")
+    else:
+        print(f"[✓] Layer split: about {remote_percent}% across worker pool; about "
+              f"{100 - remote_percent}% on controller CPU/RAM")
+    print(f"    Layer count: {remote_layers}/{total_layers} remote; {local_layers}/{total_layers} local")
 
-    cmd = [str(cli), "-m", str(model), "--rpc", f"{ip}:{port}", "--device", rpc_device.id,
+    cmd = [str(cli), "-m", str(model), "--rpc", rpc_arg, "--device", ",".join(d.id for d in rpc_devices),
        "-ngl", str(remote_layers), "-n", str(args.n_predict)]
+    if split_weights is not None and len(rpc_devices) > 1:
+        if not llama.supports_flag(cli, "--tensor-split"):
+            print("[!] This llama-cli does not support --tensor-split, required for per-worker allocation.")
+            return 1
+        cmd += ["--tensor-split", ",".join(str(value) for value in split_weights)]
     if llama.supports_flag(cli, "--single-turn"):
         cmd += ["-st"]
     elif llama.supports_flag(cli, "-no-cnv"):
@@ -280,21 +337,24 @@ def _report(r: Result, args) -> int:
     else:
         print("[!] No RPC buffer allocation seen in llama.cpp's log. The model may have run entirely on the "
               "controller CPU; check the --verbose logs and worker activity.")
-    print("    Confirm worker compute from its GPU monitor (NVIDIA: `nvidia-smi -l 1`) or CPU activity.")
+    print("    Confirm remote compute from worker GPU monitors (NVIDIA: `nvidia-smi -l 1`) or CPU activity.")
     return 0
 
 
-def _list_devices(args, ip) -> int:
+def _list_devices(args, workers) -> int:
     cli, how = llama.find_executable(config.LLAMA_CLI_NAMES, args.llama_cli or _env(config.ENV_LLAMA_CLI))
     if not cli:
         print(f"[!] llama-cli not found: {how}")
         return 1
-    ok, msg = network.tcp_check(ip, args.port)
-    if not ok:
-        print(f"[!] {msg}")
-        return 1
-    print(f"llama-cli: {cli}\nDevices visible with --rpc {ip}:{args.port}:")
-    devs, raw = llama.list_devices(cli, ["--rpc", f"{ip}:{args.port}"])
+    endpoints = [network.rpc_endpoint(ip, args.port) for ip in workers]
+    for endpoint, ip in zip(endpoints, workers):
+        ok, msg = network.tcp_check(ip, args.port)
+        if not ok:
+            print(f"[!] Worker not reachable at {endpoint}: {msg}")
+            return 1
+    rpc_arg = ",".join(endpoints)
+    print(f"llama-cli: {cli}\nDevices visible with --rpc {rpc_arg}:")
+    devs, raw = llama.list_devices(cli, ["--rpc", rpc_arg])
     print(raw.strip() if not devs else "\n".join(f"  {d.id}: {d.name}" for d in devs))
     return 0
 
