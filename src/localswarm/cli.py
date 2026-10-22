@@ -4,6 +4,7 @@ import sys
 
 from . import config
 from .controller import run_controller
+from .ui import serve_ui
 from .worker import run_worker
 
 BAR = "=" * 60
@@ -37,6 +38,14 @@ def build_parser():
                    help="override the total number of layers assigned across all workers")
     c.add_argument("--verbose", action="store_true", help="stream llama-cli's stderr log live")
     c.add_argument("--list-devices", action="store_true", help="show devices llama-cli sees with --rpc, then exit")
+
+    u = sub.add_parser("ui", help="launch the browser dashboard and local worker telemetry agent")
+    u.add_argument("--host", default="127.0.0.1",
+                   help="dashboard bind address (default keeps control panel local to this machine)")
+    u.add_argument("--port", type=int, default=8765, help="dashboard/worker-agent HTTP port")
+    u.add_argument("--agent-host", default=None,
+                   help="optional telemetry-only bind address; set 0.0.0.0 on workers for pool meters")
+    u.add_argument("--agent-port", type=int, default=8766, help="read-only telemetry agent port")
     return p
 
 
@@ -63,7 +72,11 @@ def main(argv=None) -> int:
         return 0
     if not args.mode:  # came from menu: fill defaults
         args = parser.parse_args([mode])
-    return run_worker(args) if mode == "worker" else run_controller(args)
+    if mode == "worker":
+        return run_worker(args)
+    if mode == "controller":
+        return run_controller(args)
+    return serve_ui(args.host, args.port, args.agent_host, args.agent_port)
 
 
 if __name__ == "__main__":

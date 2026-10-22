@@ -1,27 +1,21 @@
-# Python
 __pycache__/
 *.py[cod]
+*$py.class
+
 .venv/
 venv/
+env/
 
-# Environment / secrets
-.env
-
-# Node
-node_modules/
+build/
 dist/
+*.egg-info/
+.eggs/
 
-# IDE
-.vscode/
-.idea/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# LLM models
 *.gguf
-models/
-
-# Logs
+*.ggml
 *.log
+.env

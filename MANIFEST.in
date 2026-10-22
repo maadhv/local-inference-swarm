@@ -1,0 +1,1 @@
+recursive-include src/localswarm/frontend *.html
